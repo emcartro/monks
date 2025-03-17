@@ -1,8 +1,11 @@
 package orders;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 class Order {
 
@@ -187,12 +190,116 @@ class OrderCache implements OrderCacheInterface {
     }
 }
 
+class OrderCacheThreadSafe implements OrderCacheInterface {
+    private final ConcurrentHashMap<String, Order> orderMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CopyOnWriteArrayList<Order>> securityOrdersMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CopyOnWriteArrayList<Order>> userOrdersMap = new ConcurrentHashMap<>();
 
+    @Override
+    public void addOrder(Order order) {
+        orderMap.put(order.getOrderId(), order);
+        securityOrdersMap.computeIfAbsent(order.getSecurityId(), k -> new CopyOnWriteArrayList<>()).add(order);
+        userOrdersMap.computeIfAbsent(order.getUser(), k -> new CopyOnWriteArrayList<>()).add(order);
+    }
+
+    @Override
+    public void cancelOrder(String orderId) {
+        Order order = orderMap.remove(orderId);
+        if (order != null) {
+            securityOrdersMap.get(order.getSecurityId()).remove(order);
+            userOrdersMap.get(order.getUser()).remove(order);
+        }
+    }
+
+    @Override
+    public void cancelOrdersForUser(String user) {
+        CopyOnWriteArrayList<Order> userOrders = userOrdersMap.remove(user);
+        if (userOrders != null) {
+            for (Order order : userOrders) {
+                orderMap.remove(order.getOrderId());
+                securityOrdersMap.get(order.getSecurityId()).remove(order);
+            }
+        }
+    }
+
+    @Override
+    public void cancelOrdersForSecIdWithMinimumQty(String securityId, int minQty) {
+        CopyOnWriteArrayList<Order> ordersForSecurity = securityOrdersMap.getOrDefault(securityId, new CopyOnWriteArrayList<>());
+        for (Order order : ordersForSecurity) {
+            if (order.getQty() >= minQty) {
+                cancelOrder(order.getOrderId());
+            }
+        }
+    }
+
+    @Override
+    public int getMatchingSizeForSecurity(String securityId) {
+        CopyOnWriteArrayList<Order> ordersForSecurity = securityOrdersMap.getOrDefault(securityId, new CopyOnWriteArrayList<>());
+        List<Order> buyOrders = new ArrayList<>();
+        List<Order> sellOrders = new ArrayList<>();
+
+        // Separate buy and sell orders
+        for (Order order : ordersForSecurity) {
+            if ("Buy".equalsIgnoreCase(order.getSide())) {
+                buyOrders.add(order);
+            } else if ("Sell".equalsIgnoreCase(order.getSide())) {
+                sellOrders.add(order);
+            }
+        }
+
+        int totalMatchQty = 0;
+
+        // Iterate over the buy orders
+        for (Order buyOrder : buyOrders) {
+            int buyQty = buyOrder.getQty();
+            // Iterate over the sell orders
+            for (int i = 0; i < sellOrders.size(); i++) {
+                Order sellOrder = sellOrders.get(i);
+                // Verify matching security and different companies
+                if (!buyOrder.getCompany().equals(sellOrder.getCompany())) {
+                    int sellQty = sellOrder.getQty();
+                    int matchQty = Math.min(buyQty, sellQty);
+                    totalMatchQty += matchQty;
+                    buyQty -= matchQty;
+                    sellQty -= matchQty;
+
+                    // Update the sell order in the list if there is remaining quantity
+                    if (sellQty > 0) {
+                        sellOrders.set(i, new Order(
+                                sellOrder.getOrderId(),
+                                sellOrder.getSecurityId(),
+                                sellOrder.getSide(),
+                                sellQty,
+                                sellOrder.getUser(),
+                                sellOrder.getCompany()
+                        ));
+                    } else {
+                        sellOrders.remove(i);
+                        i--; // Adjust index after removal
+                    }
+
+                    // If buy order quantity is completed, go to next
+                    if (buyQty == 0) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        return totalMatchQty;
+    }
+
+
+
+    @Override
+    public List<Order> getAllOrders() {
+        return new ArrayList<>(orderMap.values());
+    }
+}
 class Main {
     public static void main(String[] args) {
         OrderCache cache = new OrderCache();
-
-        // Example 1: Order Matching Example
+         // Example 1: Order Matching Example
         System.out.println("=== Example 1: Order Matching Example ===");
         cache.addOrder(new Order("OrdId1", "SecId1", "Buy", 1000, "User1", "CompanyA"));
         cache.addOrder(new Order("OrdId2", "SecId2", "Sell", 3000, "User2", "CompanyB"));
@@ -219,51 +326,83 @@ class Main {
 
 
 
-        // Example 2: Additional Example 1
+        OrderCacheThreadSafe cacheThreadSafe = new OrderCacheThreadSafe();
 
-        cache = new OrderCache();
-        System.out.println("\n=== Example 2: Additional Example 1 ===");
-        cache.addOrder(new Order("OrdId1", "SecId1", "Sell", 100, "User10", "Company2"));
-        cache.addOrder(new Order("OrdId2", "SecId3", "Sell", 200, "User8", "Company2"));
-        cache.addOrder(new Order("OrdId3", "SecId1", "Buy", 300, "User13", "Company2"));
-        cache.addOrder(new Order("OrdId4", "SecId2", "Sell", 400, "User12", "Company2"));
-        cache.addOrder(new Order("OrdId5", "SecId3", "Sell", 500, "User7", "Company2"));
-        cache.addOrder(new Order("OrdId6", "SecId3", "Buy", 600, "User3", "Company1"));
-        cache.addOrder(new Order("OrdId7", "SecId1", "Sell", 700, "User10", "Company2"));
-        cache.addOrder(new Order("OrdId8", "SecId1", "Sell", 800, "User2", "Company1"));
-        cache.addOrder(new Order("OrdId9", "SecId2", "Buy", 900, "User6", "Company2"));
-        cache.addOrder(new Order("OrdId10", "SecId2", "Sell", 1000, "User5", "Company1"));
-        cache.addOrder(new Order("OrdId11", "SecId1", "Sell", 1100, "User13", "Company2"));
-        cache.addOrder(new Order("OrdId12", "SecId2", "Buy", 1200, "User9", "Company2"));
-        cache.addOrder(new Order("OrdId13", "SecId1", "Sell", 1300, "User1", "Company1"));
+        // Example 1: Order Matching Example
+        System.out.println("\n=== Example 1: Order Matching Example  Using OrderCacheThreadSafe===");
+        cacheThreadSafe.addOrder(new Order("OrdId1", "SecId1", "Buy", 1000, "User1", "CompanyA"));
+        cacheThreadSafe.addOrder(new Order("OrdId2", "SecId2", "Sell", 3000, "User2", "CompanyB"));
+        cacheThreadSafe.addOrder(new Order("OrdId3", "SecId1", "Sell", 500, "User3", "CompanyA"));
+        cacheThreadSafe.addOrder(new Order("OrdId4", "SecId2", "Buy", 600, "User4", "CompanyC"));
+        cacheThreadSafe.addOrder(new Order("OrdId5", "SecId2", "Buy", 100, "User5", "CompanyB"));
+        cacheThreadSafe.addOrder(new Order("OrdId6", "SecId3", "Buy", 1000, "User6", "CompanyD"));
+        cacheThreadSafe.addOrder(new Order("OrdId7", "SecId2", "Buy", 2000, "User7", "CompanyE"));
+        cacheThreadSafe.addOrder(new Order("OrdId8", "SecId2", "Sell", 5000, "User8", "CompanyE"));
 
         // Get matching size for SecId1, SecId2, and SecId3
-        System.out.println("Matching size for SecId1 (Expected: 300): " + cache.getMatchingSizeForSecurity("SecId1"));
-        System.out.println("Matching size for SecId2( Expected: 1000): " + cache.getMatchingSizeForSecurity("SecId2"));
-        System.out.println("Matching size for SecId3 ( Expected: 600) : " + cache.getMatchingSizeForSecurity("SecId3"));
+        System.out.println("Matching size for SecId1 (Expected: 0): " + cacheThreadSafe.getMatchingSizeForSecurity("SecId1"));
+        System.out.println("Matching size for SecId2( Expected: 2700): " + cacheThreadSafe.getMatchingSizeForSecurity("SecId2"));
+        System.out.println("Matching size for SecId3 ( Expected: 0) : " + cacheThreadSafe.getMatchingSizeForSecurity("SecId3"));
+
+
+        System.out.println("Orders before cancelOrdersForUser(\"User2\"): " + cacheThreadSafe.getAllOrders());
+        cacheThreadSafe.cancelOrdersForUser("User2");
+        System.out.println("Orders after cancelOrdersForUser(\"User2\"): " + cacheThreadSafe.getAllOrders());
+
+
+        cacheThreadSafe.cancelOrdersForSecIdWithMinimumQty("SecId2",2000);
+        System.out.println("Orders after cancelOrdersForSecIdWithMinimumQty(\"SecId2\",2000): " + cacheThreadSafe.getAllOrders());
+
+
+
+        // Example 2:
+
+        cacheThreadSafe = new OrderCacheThreadSafe();
+
+        System.out.println("\n=== Example 2: Using OrderCacheThreadSafe ===");
+        cacheThreadSafe.addOrder(new Order("OrdId1", "SecId1", "Sell", 100, "User10", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId2", "SecId3", "Sell", 200, "User8", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId3", "SecId1", "Buy", 300, "User13", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId4", "SecId2", "Sell", 400, "User12", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId5", "SecId3", "Sell", 500, "User7", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId6", "SecId3", "Buy", 600, "User3", "Company1"));
+        cacheThreadSafe.addOrder(new Order("OrdId7", "SecId1", "Sell", 700, "User10", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId8", "SecId1", "Sell", 800, "User2", "Company1"));
+        cacheThreadSafe.addOrder(new Order("OrdId9", "SecId2", "Buy", 900, "User6", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId10", "SecId2", "Sell", 1000, "User5", "Company1"));
+        cacheThreadSafe.addOrder(new Order("OrdId11", "SecId1", "Sell", 1100, "User13", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId12", "SecId2", "Buy", 1200, "User9", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId13", "SecId1", "Sell", 1300, "User1", "Company1"));
+
+        // Get matching size for SecId1, SecId2, and SecId3
+        System.out.println("Matching size for SecId1 (Expected: 300): " + cacheThreadSafe.getMatchingSizeForSecurity("SecId1"));
+        System.out.println("Matching size for SecId2( Expected: 1000): " + cacheThreadSafe.getMatchingSizeForSecurity("SecId2"));
+        System.out.println("Matching size for SecId3 ( Expected: 600) : " + cacheThreadSafe.getMatchingSizeForSecurity("SecId3"));
 
 
 
 
         // Example 3: Additional Example 2
-        cache = new OrderCache();
-        System.out.println("\n=== Example 3: Additional Example 2 ===");
-        cache.addOrder(new Order("OrdId1", "SecId3", "Sell", 100, "User1", "Company1"));
-        cache.addOrder(new Order("OrdId2", "SecId3", "Sell", 200, "User3", "Company2"));
-        cache.addOrder(new Order("OrdId3", "SecId1", "Buy", 300, "User2", "Company1"));
-        cache.addOrder(new Order("OrdId4", "SecId3", "Sell", 400, "User5", "Company2"));
-        cache.addOrder(new Order("OrdId5", "SecId2", "Sell", 500, "User2", "Company1"));
-        cache.addOrder(new Order("OrdId6", "SecId2", "Buy", 600, "User3", "Company2"));
-        cache.addOrder(new Order("OrdId7", "SecId2", "Sell", 700, "User1", "Company1"));
-        cache.addOrder(new Order("OrdId8", "SecId1", "Sell", 800, "User2", "Company1"));
-        cache.addOrder(new Order("OrdId9", "SecId1", "Buy", 900, "User5", "Company2"));
-        cache.addOrder(new Order("OrdId10", "SecId1", "Sell", 1000, "User1", "Company1"));
-        cache.addOrder(new Order("OrdId11", "SecId2", "Sell", 1100, "User6", "Company2"));
+        // cache = new OrderCache();
+        cacheThreadSafe = new OrderCacheThreadSafe();
+
+        System.out.println("\n=== Example 3: Using OrderCacheThreadSafe ===");
+        cacheThreadSafe.addOrder(new Order("OrdId1", "SecId3", "Sell", 100, "User1", "Company1"));
+        cacheThreadSafe.addOrder(new Order("OrdId2", "SecId3", "Sell", 200, "User3", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId3", "SecId1", "Buy", 300, "User2", "Company1"));
+        cacheThreadSafe.addOrder(new Order("OrdId4", "SecId3", "Sell", 400, "User5", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId5", "SecId2", "Sell", 500, "User2", "Company1"));
+        cacheThreadSafe.addOrder(new Order("OrdId6", "SecId2", "Buy", 600, "User3", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId7", "SecId2", "Sell", 700, "User1", "Company1"));
+        cacheThreadSafe.addOrder(new Order("OrdId8", "SecId1", "Sell", 800, "User2", "Company1"));
+        cacheThreadSafe.addOrder(new Order("OrdId9", "SecId1", "Buy", 900, "User5", "Company2"));
+        cacheThreadSafe.addOrder(new Order("OrdId10", "SecId1", "Sell", 1000, "User1", "Company1"));
+        cacheThreadSafe.addOrder(new Order("OrdId11", "SecId2", "Sell", 1100, "User6", "Company2"));
 
         // Get matching size for SecId1, SecId2, and SecId3
-        System.out.println("Matching size for SecId1 (Expected: 900): " + cache.getMatchingSizeForSecurity("SecId1"));
-        System.out.println("Matching size for SecId2( Expected: 600): " + cache.getMatchingSizeForSecurity("SecId2"));
-        System.out.println("Matching size for SecId3 ( Expected: 0) : " + cache.getMatchingSizeForSecurity("SecId3"));
+        System.out.println("Matching size for SecId1 (Expected: 900): " + cacheThreadSafe.getMatchingSizeForSecurity("SecId1"));
+        System.out.println("Matching size for SecId2( Expected: 600): " + cacheThreadSafe.getMatchingSizeForSecurity("SecId2"));
+        System.out.println("Matching size for SecId3 ( Expected: 0) : " + cacheThreadSafe.getMatchingSizeForSecurity("SecId3"));
 
     }
 }
