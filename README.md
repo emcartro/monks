@@ -1,6 +1,6 @@
 ## Prerequisites:
 1. Clone the repository from  https://github.com/emcartro/monks.git
-2. Compile the Java files:  javac Main.java
+2. Compile the Java files:  javac OrderCache.java
 
 ## Implementation Notes
 
