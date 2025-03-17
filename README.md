@@ -1,6 +1,7 @@
 ## Prerequisites:
 1. Clone the repository from  https://github.com/emcartro/monks.git
 2. Compile the Java files:  javac OrderCache.java
+3. Optional run the Main class to check some cases:   java Main 
 
 ## Implementation Notes
 
